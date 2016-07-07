@@ -186,6 +186,8 @@ static void print_header(void);
 static void print_help(void);
 static void print_run_mode(sb_test_t *);
 
+static struct sigaction actions;
+
 #ifdef HAVE_ALARM
 static void sigalrm_thread_init_timeout_handler(int sig)
 {
@@ -571,6 +573,14 @@ static void *worker_thread(void *arg)
   return NULL;
 }
 
+static void thread_exit_handler(int sig)
+{
+	if (pthread_mutex_trylock(&event_queue_mutex) < 0)
+		pthread_mutex_unlock(&event_queue_mutex);
+
+	pthread_exit(0);
+}
+
 static void *eventgen_thread_proc(void *arg)
 {
   unsigned long long pause_ns;
@@ -580,6 +590,8 @@ static void *eventgen_thread_proc(void *arg)
   int                i;
 
   (void)arg; /* unused */
+
+  sigaction(SIGUSR1, &actions, NULL);
 
   SB_LIST_INIT(&event_queue);
   i = 0;
@@ -652,6 +664,8 @@ static void *report_thread_proc(void *arg)
 
   (void)arg; /* unused */
 
+  sigaction(SIGUSR1, &actions, NULL);
+
   log_text(LOG_DEBUG, "Reporting thread started");
 
   /* Wait for other threads to initialize */
@@ -701,6 +715,8 @@ static void *checkpoints_thread_proc(void *arg)
   unsigned int             i;
 
   (void)arg; /* unused */
+
+  sigaction(SIGUSR1, &actions, NULL);
 
   log_text(LOG_DEBUG, "Checkpoints report thread started");
 
@@ -837,6 +853,12 @@ static int run_test(sb_test_t *test)
     return 1;
   }
 
+  /* Initialize the signal actions */
+  memset(&actions, 0, sizeof(actions));
+  sigemptyset(&actions.sa_mask);
+  actions.sa_flags = 0;
+  actions.sa_handler = thread_exit_handler;
+
   if (sb_globals.report_interval > 0)
   {
     /* Create a thread for intermediate statistic reports */
@@ -955,7 +977,8 @@ static int run_test(sb_test_t *test)
   /* Delay killing the reporting threads to avoid mutex lock leaks */
   if (report_thread_created)
   {
-    if (pthread_cancel(report_thread) || pthread_join(report_thread, NULL))
+    if (pthread_kill(report_thread, SIGUSR1) ||
+		    pthread_join(report_thread, NULL))
       log_errno(LOG_FATAL, "Terminating the reporting thread failed.");
   }
 
@@ -963,13 +986,14 @@ static int run_test(sb_test_t *test)
 
   if (eventgen_thread_created)
   {
-    if (pthread_cancel(eventgen_thread) || pthread_join(eventgen_thread, NULL))
+    if (pthread_kill(eventgen_thread, SIGUSR1) ||
+		    pthread_join(eventgen_thread, NULL))
       log_text(LOG_FATAL, "Terminating the event generator thread failed.");
   }
 
   if (checkpoints_thread_created)
   {
-    if (pthread_cancel(checkpoints_thread) ||
+    if (pthread_kill(checkpoints_thread, SIGUSR1) ||
         pthread_join(checkpoints_thread, NULL))
       log_errno(LOG_FATAL, "Terminating the checkpoint thread failed.");
   }
